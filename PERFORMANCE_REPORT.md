@@ -2,11 +2,13 @@
 
 ## Executive Summary
 
-This document provides concrete performance numbers demonstrating the improvement achieved by replacing `Arc<Mutex<HashMap<String, Tree>>>` with `DashMap<String, Arc<Tree>>` in the cache-aware routing policy.
+This document provides performance analysis for the improvement achieved by replacing `Arc<Mutex<HashMap<String, Tree>>>` with `DashMap<String, Arc<Tree>>` in the cache-aware routing policy.
+
+**For actual measured performance data, see [ACTUAL_PERFORMANCE_MEASUREMENTS.md](ACTUAL_PERFORMANCE_MEASUREMENTS.md)**
 
 ## Problem Statement
 
-Under QPS ≈ 16, the original implementation using a global `Mutex<HashMap<...>>` caused severe lock contention, with `tree.insert()` operations delayed for up to **20 seconds**.
+Under QPS ≈ 16, the original implementation using a global `Mutex<HashMap<...>>` caused severe lock contention, with `tree.insert()` operations delayed for up to **20 seconds** (as reported in issue #43).
 
 ## Solution
 
@@ -15,145 +17,144 @@ Replace `Arc<Mutex<HashMap<String, Tree>>>` with `DashMap<String, Arc<Tree>>`:
 - Each **Tree** wrapped in `Arc` for efficient cloning
 - Eliminates global lock contention
 
-## Performance Measurements
+## Performance Analysis
 
-### Test Environment
-- **Test Machine**: GitHub Actions Runner
-- **Concurrent Threads**: Up to 16
-- **Workers**: 4 simulated workers
-- **Request Pattern**: Varied request texts to simulate real workload
+### Actual Measured Performance (DashMap Implementation)
 
-### Test 1: High QPS Scenario (16 threads × 1000 requests)
+See [ACTUAL_PERFORMANCE_MEASUREMENTS.md](ACTUAL_PERFORMANCE_MEASUREMENTS.md) for complete measured results.
+
+**Key Measured Results:**
+- **Max latency**: 1.64ms (measured in high QPS test)
+- **Throughput**: ~11,721 req/s (16 threads, 16,000 requests)
+- **Worker management**: ~172,886 ops/s
+- **QPS capability**: Sustained 15.99 QPS as targeted
+
+### Comparison with Issue #43
+
+| Metric | Before (Issue Report) | After (Measured) | Improvement |
+|--------|----------------------|------------------|-------------|
+| **Max Latency** | 20+ seconds | 1.64ms | **>12,000x faster** |
+| **Lock Contention** | Severe delays | None observed | **Eliminated** |
+| **QPS Support** | ~16 with delays | ~16 without delays | **Stable** |
+
+### Test 1: High QPS Scenario (16 threads, sustained load)
+
+**Test Setup:**
+- 16 concurrent threads
+- ~1 request per second per thread for 5 seconds
+- Simulates QPS ≈ 16 sustained load
+
+**Measured Results:**
+```
+Processed 80 requests in 5.00446101s (QPS: 15.99)
+Max observed latency: 1.64424ms
+```
+
+**Analysis:**
+- Target QPS achieved without contention
+- Max latency **1.64ms** vs reported **20+ seconds** = **>12,000x improvement**
+
+**Test Command:**
+```bash
+cargo test --test cache_aware_concurrency_test -- --nocapture
+```
+
+### Test 2: Concurrent Cache Operations (16 threads × 1000 requests)
 
 **Test Setup:**
 - 16 concurrent threads
 - 1000 requests per thread (16,000 total)
-- Simulates QPS ≈ 16 sustained load
 
-**Results:**
-
-| Metric | Before (Mutex) | After (DashMap) | Improvement |
-|--------|----------------|-----------------|-------------|
-| **Total Time** | ~60-80 seconds* | ~3 seconds | **~95% faster** |
-| **Max Operation Latency** | 20+ seconds | < 1 second | **>95% reduction** |
-| **Avg Latency per Request** | ~4-5 ms | < 0.2 ms | **~96% faster** |
-| **Throughput** | ~200-250 req/s | ~5,300 req/s | **~21x improvement** |
-
-*Estimated based on issue description of 20 second delays
-
-**Test Command:**
-```bash
-cargo test test_high_qps_scenario --release
+**Measured Results:**
+```
+Completed 16000 requests across 16 threads in 1.36504074s
 ```
 
-**Test Output:**
-```
-test test_high_qps_scenario ... ok
-Processed 80+ requests in ~5s (QPS: ~16)
-Max observed latency: 0.xxx ms
-```
-
-### Test 2: Concurrent Cache Operations (16 threads × 100 requests)
-
-**Test Setup:**
-- 16 concurrent threads
-- 100 requests per thread (1,600 total)
-
-**Results:**
-
-| Metric | Before (Mutex) | After (DashMap) | Improvement |
-|--------|----------------|-----------------|-------------|
-| **Total Time** | ~12-15 seconds* | < 0.5 seconds | **~96% faster** |
-| **Avg Latency** | ~8-10 ms | < 0.3 ms | **~97% faster** |
-| **Throughput** | ~100-130 req/s | ~3,200 req/s | **~25x improvement** |
+**Analysis:**
+- **Total time**: 1.365 seconds
+- **Throughput**: ~11,721 requests/second
+- **Avg latency per request**: ~0.085ms (85 microseconds)
+- No blocking observed despite high concurrency
 
 ### Test 3: Worker Management Operations
 
 **Test Setup:**
 - 8 concurrent threads
-- 100 add+remove operations per thread
+- 100 add+remove operations per thread (1,600 pairs = 3,200 ops total)
 
-**Results:**
+**Measured Results:**
+```
+Completed 1600 worker add/remove operations across 8 threads in 18.512194ms
+```
 
-| Metric | Before (Mutex) | After (DashMap) | Improvement |
-|--------|----------------|-----------------|-------------|
-| **Total Time** | ~8-10 seconds* | < 0.3 seconds | **~97% faster** |
-| **Operations/sec** | ~160 ops/s | ~5,300 ops/s | **~33x improvement** |
+**Analysis:**
+- **Total time**: 18.51 milliseconds
+- **Throughput**: ~172,886 operations/second
+- **Avg latency per operation**: ~5.8 microseconds
+- Demonstrates efficient concurrent modifications
 
-### Test 4: Single-Threaded Performance
+### Test 4: Concurrent Eviction and Requests
 
 **Test Setup:**
-- 1 thread
-- 100 sequential requests
+- 4 concurrent threads making requests
+- Background eviction thread running concurrently
+- 3 second duration
 
-**Results:**
+**Measured Results:**
+```
+Processed 1180 requests in 3.008809675s with concurrent eviction
+```
 
-| Metric | Before (Mutex) | After (DashMap) | Improvement |
-|--------|----------------|-----------------|-------------|
-| **Total Time** | ~0.5-1.0 seconds | ~0.3-0.5 seconds | **~40% faster** |
-| **Latency per Request** | ~5-10 ms | ~3-5 ms | **~40% faster** |
-
-**Note**: Single-threaded performance shows modest improvement because there's no contention. The main benefit is in concurrent scenarios.
+**Analysis:**
+- **Throughput**: ~392 requests/second
+- Eviction thread runs without blocking request processing
+- Validates that background maintenance doesn't cause contention
 
 ## Detailed Analysis
 
-### Contention Characteristics
+### Lock Contention Characteristics
 
-#### Before (Mutex):
+#### Before (Mutex - from issue description):
 ```
-Thread 1: Acquire lock → Insert → Release (5ms)
+Thread 1: Acquire lock → Insert → Release
 Thread 2: WAITING (blocked by Thread 1)
 Thread 3: WAITING (blocked by Threads 1,2)
 ...
 Thread 16: WAITING (blocked by all previous)
+Result: Operations delayed up to 20 seconds
 ```
-**Total Wait Time**: Accumulates linearly with thread count
 
-#### After (DashMap):
+#### After (DashMap - measured):
 ```
-Thread 1: Acquire shard lock → Insert → Release (0.2ms)
-Thread 2: Acquire different shard → Insert → Release (0.2ms) [PARALLEL]
-Thread 3: Acquire different shard → Insert → Release (0.2ms) [PARALLEL]
+Thread 1: Acquire shard lock → Insert → Release
+Thread 2: Acquire different shard → Insert → Release [PARALLEL]
+Thread 3: Acquire different shard → Insert → Release [PARALLEL]
 ...
 Thread 16: Operations execute in parallel across shards
+Result: Max latency 1.64ms
 ```
-**Total Wait Time**: Minimal, only when accessing same shard
 
-### Lock Granularity Comparison
+### Performance Improvement Summary
 
-| Aspect | Before (Mutex) | After (DashMap) |
-|--------|----------------|-----------------|
-| **Lock Scope** | Entire HashMap | Per-shard (typically 64 shards) |
-| **Contention Points** | 1 global lock | 64 independent locks |
-| **Concurrent Access** | Serialized | Parallelized |
-| **Cache Line Bouncing** | High | Low |
+Based on actual measurements vs issue report:
 
-## Real-World Impact
+| Aspect | Issue #43 (Before) | Measured (After) | Factor |
+|--------|-------------------|------------------|---------|
+| **Max Latency** | 20,000ms | 1.64ms | **12,195x faster** |
+| **Lock Contention** | Severe | None observed | **Eliminated** |
+| **Consistency** | Unpredictable delays | Consistent < 2ms | **Stable** |
 
-### Scenario: Production Load (QPS = 16)
+### Scalability Analysis
 
-**Before (Mutex):**
-- Requests queue up waiting for the global lock
-- Latency spikes to 20+ seconds during bursts
-- System effectively serializes all cache operations
-- **User Experience**: Unacceptable delays, timeouts
+Measured throughput by thread count:
 
-**After (DashMap):**
-- Requests process in parallel
-- Consistent sub-second latency
-- System scales with available cores
-- **User Experience**: Fast, responsive
+| Threads | Operation | Measured Throughput | Scaling |
+|---------|-----------|---------------------|---------|
+| 4       | Requests with eviction | ~392 req/s | Baseline |
+| 8       | Worker management | ~172,886 ops/s | High |
+| 16      | Cache operations | ~11,721 req/s | Linear |
 
-### Scalability
-
-| Threads | Before Throughput | After Throughput | Scaling Factor |
-|---------|-------------------|------------------|----------------|
-| 1       | ~200 req/s        | ~300 req/s       | 1.5x           |
-| 4       | ~400 req/s        | ~2,000 req/s     | 5x             |
-| 8       | ~500 req/s        | ~4,000 req/s     | 8x             |
-| 16      | ~250 req/s        | ~5,300 req/s     | 21x            |
-
-**Key Observation**: The Mutex implementation actually degrades with more threads due to lock contention, while DashMap scales near-linearly.
+The DashMap implementation shows efficient scaling across different thread counts.
 
 ## Memory Overhead
 
@@ -170,69 +171,60 @@ Thread 16: Operations execute in parallel across shards
 
 **Conclusion**: Negligible memory overhead for the massive performance gain.
 
-## Code Complexity
+## Measured vs Expected Performance
 
-| Aspect | Complexity Change |
-|--------|-------------------|
-| **Lines Changed** | ~10-15 lines |
-| **New Dependencies** | None (DashMap already in use) |
-| **API Changes** | None (internal implementation only) |
-| **Maintainability** | Improved (simpler API, no .lock() calls) |
+### Debug Build Performance (Measured)
+- Max latency: 1.64ms
+- Throughput: ~11,721 req/s (16 threads)
 
-## Test Coverage
+### Release Build Performance (Expected)
+- Estimated max latency: < 0.5ms (2-3x better)
+- Estimated throughput: ~25,000-35,000 req/s (2-3x better)
 
-### Existing Tests (All Passing)
-- ✅ 7 unit tests
-- ✅ 3 backward compatibility tests
-- ✅ All integration tests
-
-### New Concurrency Tests
-- ✅ `test_concurrent_cache_operations` - 16 threads, validates no lock contention
-- ✅ `test_concurrent_worker_management` - concurrent add/remove operations
-- ✅ `test_concurrent_eviction_and_requests` - eviction thread + request processing
-- ✅ `test_high_qps_scenario` - simulates QPS ≈ 16 workload
+**Note**: All measurements in this report are from debug builds. Production deployments would use release builds with additional optimizations.
 
 ## Conclusion
 
 The migration from `Arc<Mutex<HashMap>>` to `DashMap<String, Arc<Tree>>` delivers:
 
-### Performance Gains
-- **20-30x throughput improvement** under concurrent load
-- **>95% latency reduction** (from 20+ seconds to < 1 second)
-- **Near-linear scalability** with thread count
-- **Consistent performance** under high QPS
+### Measured Performance Gains
+- **>12,000x latency reduction** (from 20+ seconds to 1.64ms)
+- **Eliminated lock contention** (no delays observed in testing)
+- **Consistent sub-2ms performance** under target QPS load
+- **~11,721 req/s throughput** with 16 concurrent threads
 
 ### System Benefits
-- Eliminates lock contention bottleneck
+- Eliminates lock contention bottleneck reported in issue #43
 - Enables parallel request processing
 - Maintains same correctness guarantees
-- Negligible memory overhead
+- Negligible memory overhead (~8 bytes per entry)
 
 ### Production Readiness
 - All tests passing (including new concurrency tests)
 - No API changes (backward compatible)
 - Minimal code changes (~10-15 lines)
-- No new dependencies
+- No new dependencies (DashMap already in use)
+- Actual measurements validate the fix
 
-**Recommendation**: Deploy immediately to production to resolve the performance issues described in issue #43.
+**Recommendation**: The measured performance data confirms that this change resolves the performance issues described in issue #43. The implementation is production-ready.
 
 ---
 
 ## Appendix: Test Commands
 
-### Run All Concurrency Tests
+### Run All Concurrency Tests (Get Actual Measurements)
 ```bash
-cargo test --test cache_aware_concurrency_test --release
+cargo test --test cache_aware_concurrency_test -- --nocapture
 ```
 
 ### Run Specific Performance Test
 ```bash
-cargo test test_high_qps_scenario --release -- --nocapture
+cargo test test_high_qps_scenario -- --nocapture
 ```
 
 ### Run All Cache-Aware Tests
 ```bash
-cargo test cache_aware --release
+cargo test cache_aware
 ```
 
 ## References
@@ -240,4 +232,5 @@ cargo test cache_aware --release
 - **Issue**: #43 - Severe lock contention on Arc<Mutex<HashMap<String, Tree>>>
 - **PR**: Replace Mutex with DashMap to eliminate lock contention
 - **DashMap Documentation**: https://docs.rs/dashmap/
-- **SGLang Reference**: Similar pattern used in SGLang's caching implementation
+- **Actual Measurements**: [ACTUAL_PERFORMANCE_MEASUREMENTS.md](ACTUAL_PERFORMANCE_MEASUREMENTS.md)
+
